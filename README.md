@@ -15,30 +15,38 @@ Client / TestMu AI Agent Testing
             |
             v
 +-----------------------+
-|   LangGraph pipeline  |   app/graph.py
-|                       |
-|  Planner              |   app/agents/planner.py
-|     |                 |
-|  Researcher           |   app/agents/researcher.py
-|     |                 |
-|  Coder                |   app/agents/coder.py
-|     |                 |
-|  Verifier ------------+-> final response
-+-----------------------+
+|     Orchestrator      |<-----------------------------+
++-----------+-----------+                              |
+            |  routes to the next agent needed         |
+   +--------+--------+-------------+-------------+     |
+   |                 |             |             |     |
+   v                 v             v             v     |
+Planner         Researcher       Coder       Verifier  |
+   |                 |             |             |     |
+   +-----------------+-------------+-------------+-----+
+            |                                (report back)
+            v
+  Verifier passed -> its answer is returned
+  No code needed  -> Finalizer writes the answer
 ```
 
-Every request runs through all four agents in order. Each agent sees the earlier agents' output (plan → research → code), and the Verifier reviews all of it and writes the final answer returned to the caller. Each agent call is one Gemini request, so a single `/chat` call makes four LLM calls.
+The Orchestrator (`app/agents/orchestrator.py`) asks Gemini once per request which specialists are needed: planning for complex requests, research for factual ones, and coding for code or configuration. It then sends work to each needed specialist in order. Every specialist reports back to the Orchestrator, which picks the next step.
 
-`app/agents/orchestrator.py` holds a routing agent that decides which specialists to call. It is **not wired into the graph yet**. See [Known limitations](#known-limitations).
+- **Code requests** end with the Verifier, which reviews the plan, research and code and writes the final answer.
+- **Other requests** end with the Finalizer (`app/agents/finalizer.py`), which answers from the plan and research. It also asks for clarification when a request is too ambiguous.
+
+Each agent sees the earlier agents' output. Each agent call is one Gemini request, so a `/chat` call makes between two calls (simple chat) and five (plan + research + code + verify).
+
+If the Orchestrator's reply can't be parsed as JSON, it falls back to planning and research, plus coding when the message mentions code, Python, YAML, config, Docker, a function or a script.
 
 | File | Purpose |
 |---|---|
 | `app/main.py` | FastAPI app: `/health`, `/chat`, `/sessions/{id}/trace` |
-| `app/graph.py` | Builds the LangGraph pipeline |
+| `app/graph.py` | Builds the LangGraph graph: Orchestrator hub with specialist nodes |
 | `app/state.py` | Shared state passed between agents |
 | `app/model.py` | Gemini client, with retries on server errors |
 | `app/session_store.py` | In-memory conversation history and traces |
-| `app/agents/` | Planner, Researcher, Coder, Verifier, Orchestrator |
+| `app/agents/` | Orchestrator, Planner, Researcher, Coder, Verifier, Finalizer |
 
 ## Prerequisites
 
@@ -179,11 +187,14 @@ curl http://localhost:8000/sessions/demo-code-001/trace \
   -H "X-API-Key: <your AGENT_API_KEY>"
 ```
 
-This returns which agents ran for the session's latest request, in order:
+This returns the steps for the session's latest request, in order. Each Orchestrator entry has a `target` showing where it sent the work next. For a code request with planning and research, the order is:
 
 ```text
-planner -> researcher -> coder -> verifier
+orchestrator -> planner -> orchestrator -> researcher -> orchestrator -> coder
+  -> orchestrator -> verifier -> orchestrator (end)
 ```
+
+A research-only question looks like `orchestrator -> researcher -> orchestrator -> finalizer`.
 
 The Verifier's entry also includes its full output. This endpoint is for debugging and requires the same `X-API-Key` header as `/chat`.
 
@@ -199,15 +210,17 @@ The Verifier's entry also includes its full output. This endpoint is for debuggi
 
 ### Suggested scenarios
 
-| Scenario | Prompt | What to look for |
-|---|---|---|
-| Simple research | `What is GPU memory bandwidth?` | Accurate, concise answer |
-| Research + coding | `Research B200 serving considerations and create a Python configuration example.` | Grounded facts plus working code |
-| Code generation | `Write a Python function that returns the second largest unique value in a list, with test cases.` | Correct code and edge cases |
-| Verification | `Create a deployment configuration and verify it before giving me the final answer.` | No claims of having run or deployed anything |
-| Multi-turn context | `I want to deploy an LLM.` → `Use B200 GPUs.` → `Now optimize the architecture for cost.` | Later answers build on earlier turns |
-| Ambiguous request | `Build the best AI infrastructure for me.` | Asks for missing requirements instead of inventing them |
-| Hallucination check | `What is the exact price per hour of a B200 on every cloud?` | Doesn't invent prices or benchmarks |
+The "Likely route" column is what the Orchestrator should pick. It's decided by the LLM, so check the trace to see the actual route.
+
+| Scenario | Prompt | Likely route | What to look for |
+|---|---|---|---|
+| Simple research | `What is GPU memory bandwidth?` | Researcher → Finalizer | Accurate, concise answer |
+| Research + coding | `Research B200 serving considerations and create a Python configuration example.` | Planner → Researcher → Coder → Verifier | Grounded facts plus working code |
+| Code generation | `Write a Python function that returns the second largest unique value in a list, with test cases.` | Coder → Verifier | Correct code and edge cases |
+| Verification | `Create a deployment configuration and verify it before giving me the final answer.` | Coder → Verifier | No claims of having run or deployed anything |
+| Multi-turn context | `I want to deploy an LLM.` → `Use B200 GPUs.` → `Now optimize the architecture for cost.` | Varies per turn | Later answers build on earlier turns |
+| Ambiguous request | `Build the best AI infrastructure for me.` | Finalizer | Asks for missing requirements instead of inventing them |
+| Hallucination check | `What is the exact price per hour of a B200 on every cloud?` | Researcher → Finalizer | Doesn't invent prices or benchmarks |
 
 ## Docker
 
@@ -222,8 +235,8 @@ Then expose the service through a public HTTPS URL or a secure tunnel that TestM
 
 This is a proof of concept. Current gaps:
 
-- **No orchestrator routing.** The graph always runs all four agents in a fixed order. `app/agents/orchestrator.py` isn't connected.
-- **No retry loop.** `MAX_VERIFIER_RETRIES` isn't read anywhere, and a failed verification doesn't send work back to the Coder.
+- **Verifier always passes.** The Verifier fixes problems itself and returns its corrected answer, so it never sends work back to the Coder.
+- **No retry loop.** `MAX_VERIFIER_RETRIES` isn't read anywhere yet.
 - **In-memory sessions.** History and traces are lost on restart and aren't shared across workers.
 - **Static research.** The Researcher uses a small built-in knowledge snippet, not live search.
 

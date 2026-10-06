@@ -45,5 +45,6 @@ Return ONLY the final answer that should be shown to the user.
 
     return {
         "final_response": response,
+        "verifier_passed": True,
         "trace": trace
     }
