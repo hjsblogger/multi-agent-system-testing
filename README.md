@@ -67,7 +67,7 @@ On each hop the Orchestrator takes the first rule that matches:
 - **Code requests** end with the Verifier, which reviews the plan, research and code. If the code fails review, the Verifier sends its feedback back to the Coder for another attempt, up to `MAX_VERIFIER_RETRIES` times. When the code passes, or the retries run out, the Verifier writes the final answer (its best corrected answer if the code still fails).
 - **Other requests** end with the Finalizer (`app/agents/finalizer.py`), which answers from the plan and research. It also asks for clarification when a request is too ambiguous.
 
-Each agent sees the earlier agents' output. Each agent call is one Gemini request, so a `/chat` call makes between two calls (simple chat) and five (plan + research + code + verify), plus two more (code + verify) for each Verifier retry.
+Each agent sees the conversation history and the earlier agents' output. Each agent call is one Gemini request, so a `/chat` call makes between two calls (simple chat) and five (plan + research + code + verify), plus two more (code + verify) for each Verifier retry.
 
 If the Orchestrator's reply can't be parsed as JSON, it falls back to planning and research, plus coding when the message mentions code, Python, YAML, config, Docker, a function or a script.
 
@@ -77,7 +77,7 @@ If the Orchestrator's reply can't be parsed as JSON, it falls back to planning a
 | `app/graph.py` | Builds the LangGraph graph: Orchestrator hub with specialist nodes |
 | `app/state.py` | Shared state passed between agents |
 | `app/model.py` | Gemini client, with retries on server errors |
-| `app/session_store.py` | In-memory conversation history and traces |
+| `app/session_store.py` | Conversation history and traces, stored in SQLite |
 | `app/agents/` | Orchestrator, Planner, Researcher, Coder, Verifier, Finalizer |
 
 ## Prerequisites
@@ -106,6 +106,7 @@ MAX_VERIFIER_RETRIES=1
 | `GEMINI_MODEL` | No | Gemini model to use. Defaults to `gemini-3.5-flash-lite`. If your key can't use it, pick another model available to your project, such as `gemini-2.5-flash`. |
 | `AGENT_API_KEY` | Recommended | Secret that callers must send in the `X-API-Key` header. **If it's unset, `/chat` accepts requests without a key.** |
 | `MAX_VERIFIER_RETRIES` | No | How many times the Verifier can send failed code back to the Coder. Defaults to `1`. Set `0` to disable retries. |
+| `SESSION_DB_PATH` | No | SQLite file for conversation history and traces. Defaults to `sessions.db` in the working directory. The file and its folder are created on first start. |
 
 `.env` is listed in `.gitignore`. Never commit it.
 
@@ -191,7 +192,7 @@ If no session ID is given either way, the server generates a UUID and returns it
 
 ## 5. Multi-turn conversations
 
-Reuse the same `session_id` for each turn. The server keeps the conversation history in memory and passes it to the agents.
+Reuse the same `session_id` for each turn. The server stores the conversation history in SQLite and passes it to every agent.
 
 ```bash
 curl -X POST http://localhost:8000/chat \
@@ -210,7 +211,7 @@ curl -X POST http://localhost:8000/chat \
   -d '{"session_id":"demo-002","message":"Now optimize the architecture for cost."}'
 ```
 
-History is lost when the server restarts.
+History and traces survive server restarts. To start fresh, stop the server and delete the `SESSION_DB_PATH` file.
 
 ## 6. Inspect the agent trace
 
@@ -258,8 +259,10 @@ The "Likely route" column is what the Orchestrator should pick. It's decided by 
 
 ```bash
 docker build -t multi-agent-system-testing .
-docker run --rm -p 8000:8000 --env-file .env multi-agent-system-testing
+docker run --rm -p 8000:8000 --env-file .env -v agent-sessions:/app/data multi-agent-system-testing
 ```
+
+The image stores sessions in `/app/data/sessions.db`. The `-v agent-sessions:/app/data` volume keeps them when the container is replaced. Leave `SESSION_DB_PATH` unset in `.env` when using Docker, or point it inside `/app/data`.
 
 Then expose the service through a public HTTPS URL or a secure tunnel that TestMu can reach.
 
@@ -268,8 +271,8 @@ Then expose the service through a public HTTPS URL or a secure tunnel that TestM
 This is a proof of concept. Current gaps:
 
 - **Verifier is the only check.** Code is reviewed by the LLM, never executed, so the retry loop only catches problems the Verifier notices.
-- **Partial history.** Only the Orchestrator, Finalizer and Verifier see the conversation history. The Planner, Researcher and Coder see only the current message.
-- **In-memory sessions.** History and traces are lost on restart and aren't shared across workers.
+- **Single-host sessions.** SQLite is shared by workers on one machine, but not across machines. Running several replicas needs a shared database.
+- **Unbounded history.** Every agent gets the full conversation, so long sessions make prompts grow with each turn.
 - **Static research.** The Researcher uses a small built-in knowledge snippet, not live search.
 
-Before production, also consider Redis or PostgreSQL for sessions, LangGraph checkpoints, request IDs and tracing, rate limiting, and a secret manager.
+Before production, also consider PostgreSQL or Redis for sessions across hosts, LangGraph checkpoints, request IDs and tracing, rate limiting, and a secret manager.

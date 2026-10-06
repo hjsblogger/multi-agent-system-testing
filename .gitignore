@@ -3,6 +3,10 @@
 .env.*
 !.env.example
 
+# Session database
+sessions.db*
+data/
+
 # Virtual environments
 .venv/
 venv/

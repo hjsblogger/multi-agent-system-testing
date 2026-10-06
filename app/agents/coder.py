@@ -9,6 +9,7 @@ The Verifier rejected it with this feedback:
 {state.get("verifier_feedback", "")}
 Fix every problem in the feedback.'''
     r = model.invoke(f'''You are the Coder agent.
+Conversation history: {state.get("conversation", [])}
 User request: {state["user_message"]}
 Plan: {state.get("plan", "")}
 Research: {state.get("research", "")}
