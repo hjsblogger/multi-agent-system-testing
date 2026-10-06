@@ -1,4 +1,19 @@
+import json
+import os
+
 from app.model import model
+
+MAX_VERIFIER_RETRIES = int(os.getenv("MAX_VERIFIER_RETRIES", "1"))
+
+
+def _parse(text):
+    text = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    try:
+        d = json.loads(text)
+        return bool(d.get("passed", False)), str(d.get("feedback", "")), str(d.get("answer", ""))
+    except Exception:
+        # Unparseable reply: treat it as the final answer, as before the retry loop existed.
+        return True, "", text
 
 
 def verifier(state):
@@ -27,24 +42,35 @@ Execution trace:
 
 Determine whether the work is correct and complete.
 
-If it is correct, provide a concise final answer to the user.
+Return JSON only:
+{{"passed": true/false, "feedback": "...", "answer": "..."}}
 
-If it is not correct, identify the problem and provide the best corrected answer.
-
-Return ONLY the final answer that should be shown to the user.
+- passed: true if the code/configuration is correct and complete.
+- feedback: if passed is false, the specific problems the Coder must fix. Otherwise empty.
+- answer: the final answer to show the user. If passed is false, give the best corrected answer you can.
 """)
 
-    response = r.content
+    passed, feedback, answer = _parse(r.content)
+    retries = state.get("verifier_retries", 0)
+    retry = not passed and retries < MAX_VERIFIER_RETRIES
 
-    trace = state["trace"] + [
-        {
+    update = {
+        "verifier_passed": passed,
+        "trace": state["trace"] + [{
             "agent": "verifier",
-            "output": response
-        }
-    ]
-
-    return {
-        "final_response": response,
-        "verifier_passed": True,
-        "trace": trace
+            "action": "verify",
+            "passed": passed,
+            "retry": retry,
+            "feedback": feedback,
+            "output": answer,
+        }],
     }
+
+    if retry:
+        # Send the work back to the Coder with the feedback.
+        update.update({"needs_revision": True, "verifier_feedback": feedback, "verifier_retries": retries + 1})
+    else:
+        # Passed, or out of retries: return the best answer we have.
+        update["final_response"] = answer
+
+    return update

@@ -15,4 +15,6 @@ class AgentState(TypedDict):
     research: str
     code: str
     verifier_passed: bool
+    verifier_feedback: str
+    needs_revision: bool
     final_response: str

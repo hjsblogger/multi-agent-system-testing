@@ -11,13 +11,14 @@ flowchart TD
   O -->|needs planning, no plan yet| PL[Planner]
   O -->|needs research, none yet| RS[Researcher]
   O -->|needs code, none yet| CD[Coder]
-  O -->|code not verified yet| VF[Verifier]
+  O -->|no final answer yet| VF[Verifier]
   O -->|no code needed| FN[Finalizer]
-  O -->|verifier passed| END([Response])
+  O -->|final answer ready| END([Response])
   PL -->|plan| O
   RS -->|research| O
   CD -->|code| O
-  VF -->|final answer| O
+  VF -->|pass, or out of retries| O
+  VF -.->|fail: feedback, retry| O
   FN -->|final answer| END
 ```
 
@@ -45,8 +46,9 @@ Planner         Researcher       Coder       Verifier  |
    +-----------------+-------------+-------------+-----+
             |                                (report back)
             v
-  Verifier passed -> its answer is returned
-  No code needed  -> Finalizer writes the answer
+  Verifier failed  -> feedback goes back to the Coder (up to MAX_VERIFIER_RETRIES)
+  Verifier passed  -> its answer is returned
+  No code needed   -> Finalizer writes the answer
 ```
 
 The Orchestrator (`app/agents/orchestrator.py`) asks Gemini once per request which specialists are needed: planning for complex requests, research for factual ones, and coding for code or configuration. It then sends work to each needed specialist in order. Every specialist reports back to the Orchestrator, which picks the next step.
@@ -57,15 +59,15 @@ On each hop the Orchestrator takes the first rule that matches:
 |---|---|---|
 | 1 | Planning needed and no plan yet | Planner |
 | 2 | Research needed and no research yet | Researcher |
-| 3 | Coding needed and no code yet | Coder |
-| 4 | Coding needed and code not verified yet | Verifier |
-| 5 | Verifier has passed the work | End, returning the Verifier's answer |
+| 3 | Coding needed and no code yet, or the Verifier asked for a revision | Coder |
+| 4 | Coding needed and no final answer yet | Verifier |
+| 5 | Verifier has produced the final answer | End, returning the Verifier's answer |
 | 6 | Anything else | Finalizer, then end |
 
-- **Code requests** end with the Verifier, which reviews the plan, research and code and writes the final answer.
+- **Code requests** end with the Verifier, which reviews the plan, research and code. If the code fails review, the Verifier sends its feedback back to the Coder for another attempt, up to `MAX_VERIFIER_RETRIES` times. When the code passes, or the retries run out, the Verifier writes the final answer (its best corrected answer if the code still fails).
 - **Other requests** end with the Finalizer (`app/agents/finalizer.py`), which answers from the plan and research. It also asks for clarification when a request is too ambiguous.
 
-Each agent sees the earlier agents' output. Each agent call is one Gemini request, so a `/chat` call makes between two calls (simple chat) and five (plan + research + code + verify).
+Each agent sees the earlier agents' output. Each agent call is one Gemini request, so a `/chat` call makes between two calls (simple chat) and five (plan + research + code + verify), plus two more (code + verify) for each Verifier retry.
 
 If the Orchestrator's reply can't be parsed as JSON, it falls back to planning and research, plus coding when the message mentions code, Python, YAML, config, Docker, a function or a script.
 
@@ -103,7 +105,7 @@ MAX_VERIFIER_RETRIES=1
 | `GEMINI_API_KEY` | Yes | Gemini API key. `GOOGLE_API_KEY` also works. |
 | `GEMINI_MODEL` | No | Gemini model to use. Defaults to `gemini-3.5-flash-lite`. If your key can't use it, pick another model available to your project, such as `gemini-2.5-flash`. |
 | `AGENT_API_KEY` | Recommended | Secret that callers must send in the `X-API-Key` header. **If it's unset, `/chat` accepts requests without a key.** |
-| `MAX_VERIFIER_RETRIES` | No | Reserved for the Coder → Verifier retry loop. Not used yet. |
+| `MAX_VERIFIER_RETRIES` | No | How many times the Verifier can send failed code back to the Coder. Defaults to `1`. Set `0` to disable retries. |
 
 `.env` is listed in `.gitignore`. Never commit it.
 
@@ -226,7 +228,7 @@ orchestrator -> planner -> orchestrator -> researcher -> orchestrator -> coder
 
 A research-only question looks like `orchestrator -> researcher -> orchestrator -> finalizer`.
 
-The Verifier's entry also includes its full output. This endpoint is for debugging and requires the same `X-API-Key` header as `/chat`.
+If the Verifier rejects the code, the trace repeats `coder -> orchestrator -> verifier` for each retry. Each Verifier entry includes `passed`, `retry`, its `feedback` and its full output. This endpoint is for debugging and requires the same `X-API-Key` header as `/chat`.
 
 ## 7. Testing with TestMu AI Agent Testing
 
@@ -265,8 +267,7 @@ Then expose the service through a public HTTPS URL or a secure tunnel that TestM
 
 This is a proof of concept. Current gaps:
 
-- **Verifier always passes.** The Verifier fixes problems itself and returns its corrected answer, so it never sends work back to the Coder.
-- **No retry loop.** `MAX_VERIFIER_RETRIES` isn't read anywhere yet.
+- **Verifier is the only check.** Code is reviewed by the LLM, never executed, so the retry loop only catches problems the Verifier notices.
 - **Partial history.** Only the Orchestrator, Finalizer and Verifier see the conversation history. The Planner, Researcher and Coder see only the current message.
 - **In-memory sessions.** History and traces are lost on restart and aren't shared across workers.
 - **Static research.** The Researcher uses a small built-in knowledge snippet, not live search.

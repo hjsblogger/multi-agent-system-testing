@@ -27,9 +27,9 @@ def orchestrator(state):
 
     if d["needs_planning"] and not state.get("plan"): nxt = "planner"
     elif d["needs_research"] and not state.get("research"): nxt = "researcher"
-    elif d["needs_coding"] and not state.get("code"): nxt = "coder"
-    elif d["needs_coding"] and not state.get("verifier_passed"): nxt = "verifier"
-    elif state.get("verifier_passed"): nxt = "end"
+    elif d["needs_coding"] and (not state.get("code") or state.get("needs_revision")): nxt = "coder"
+    elif d["needs_coding"] and not state.get("final_response"): nxt = "verifier"
+    elif state.get("final_response"): nxt = "end"
     else: nxt = "finalize"
 
     return {**d, "next_step": nxt, "trace": state.get("trace", []) + [{"agent": "orchestrator", "action": "route", "target": nxt, "status": "completed"}]}
