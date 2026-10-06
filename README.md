@@ -27,7 +27,7 @@ Client / TestMu AI Agent Testing
 +-----------------------+
 ```
 
-Every request runs through all four agents in order. The Verifier writes the final answer returned to the caller. Each agent call is one Gemini request, so a single `/chat` call makes four LLM calls.
+Every request runs through all four agents in order. Each agent sees the earlier agents' output (plan → research → code), and the Verifier reviews all of it and writes the final answer returned to the caller. Each agent call is one Gemini request, so a single `/chat` call makes four LLM calls.
 
 `app/agents/orchestrator.py` holds a routing agent that decides which specialists to call. It is **not wired into the graph yet**. See [Known limitations](#known-limitations).
 
@@ -221,7 +221,6 @@ Then expose the service through a public HTTPS URL or a secure tunnel that TestM
 
 This is a proof of concept. Current gaps:
 
-- **Agent outputs aren't shared between agents.** The Planner, Researcher and Coder return `plan`, `research` and `code`, but `AgentState` in `app/state.py` doesn't declare those fields, so LangGraph discards them. Each agent works only from the user message, and the Verifier writes the final answer without seeing the Coder's output.
 - **No orchestrator routing.** The graph always runs all four agents in a fixed order. `app/agents/orchestrator.py` isn't connected.
 - **No retry loop.** `MAX_VERIFIER_RETRIES` isn't read anywhere, and a failed verification doesn't send work back to the Coder.
 - **In-memory sessions.** History and traces are lost on restart and aren't shared across workers.

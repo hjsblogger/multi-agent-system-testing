@@ -7,4 +7,7 @@ class AgentState(TypedDict):
     conversation: List[Dict[str, Any]]
     verifier_retries: int
     trace: List[Dict[str, Any]]
+    plan: str
+    research: str
+    code: str
     final_response: str

@@ -13,6 +13,15 @@ Review the work performed by the other agents.
 Conversation:
 {state["conversation"]}
 
+Plan:
+{state.get("plan", "")}
+
+Research:
+{state.get("research", "")}
+
+Code / configuration:
+{state.get("code", "")}
+
 Execution trace:
 {state["trace"]}
 
