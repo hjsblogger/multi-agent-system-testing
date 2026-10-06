@@ -1,44 +1,51 @@
-# Multi-Agent + TestMu AI POC
+# Multi-Agent System Testing
 
-A small, runnable multi-agent system designed to expose **one REST endpoint** to TestMu AI Agent Testing while keeping the Planner, Researcher, Coder, and Verifier agents behind an Orchestrator.
+A small multi-agent assistant built with **FastAPI**, **LangGraph** and **Google Gemini**. It exposes a single REST endpoint (`POST /chat`) so the whole system can be tested as one chat agent, for example with TestMu AI Agent Testing, while the Planner, Researcher, Coder and Verifier agents run behind it.
 
 ## Architecture
 
 ```text
-TestMu AI Agent Testing
+Client / TestMu AI Agent Testing
           |
           | POST /chat
           v
 +-----------------------+
-|     FastAPI API       |
+|     FastAPI API       |   app/main.py
 +-----------+-----------+
             |
             v
 +-----------------------+
-|     Orchestrator      |
-+-----------+-----------+
-            |
-    +-------+-------+----------------+
-    |               |                |
-    v               v                v
- Planner        Researcher         Coder
-                                    |
-                                    v
-                                Verifier
-                                    |
-                         PASS ------+------ FAIL
-                          |                 |
-                          v                 v
-                       Final             Coder
-                       response            |
-                                           +--> Verifier
+|   LangGraph pipeline  |   app/graph.py
+|                       |
+|  Planner              |   app/agents/planner.py
+|     |                 |
+|  Researcher           |   app/agents/researcher.py
+|     |                 |
+|  Coder                |   app/agents/coder.py
+|     |                 |
+|  Verifier ------------+-> final response
++-----------------------+
 ```
 
-The LLM used by all agents is **Google Gemini**. The default configuration uses `gemini-3.5-flash-lite`. The Gemini API has a free tier with free input/output tokens for eligible models, subject to Google's current rate limits and model availability. Check Google's pricing/model pages if your project does not have access to the configured model.
+Every request runs through all four agents in order. The Verifier writes the final answer returned to the caller. Each agent call is one Gemini request, so a single `/chat` call makes four LLM calls.
 
-## 1. Configure Gemini
+`app/agents/orchestrator.py` holds a routing agent that decides which specialists to call. It is **not wired into the graph yet**. See [Known limitations](#known-limitations).
 
-Create/get your Gemini API key from Google AI Studio, then:
+| File | Purpose |
+|---|---|
+| `app/main.py` | FastAPI app: `/health`, `/chat`, `/sessions/{id}/trace` |
+| `app/graph.py` | Builds the LangGraph pipeline |
+| `app/state.py` | Shared state passed between agents |
+| `app/model.py` | Gemini client, with retries on server errors |
+| `app/session_store.py` | In-memory conversation history and traces |
+| `app/agents/` | Planner, Researcher, Coder, Verifier, Orchestrator |
+
+## Prerequisites
+
+- Python 3.12 or later
+- A Gemini API key from [Google AI Studio](https://aistudio.google.com/)
+
+## 1. Configure
 
 ```bash
 cp .env.example .env
@@ -47,37 +54,34 @@ cp .env.example .env
 Edit `.env`:
 
 ```env
-GEMINI_API_KEY=YOUR_GEMINI_KEY
+GEMINI_API_KEY=your-gemini-api-key
 GEMINI_MODEL=gemini-3.5-flash-lite
-AGENT_API_KEY=change-me
+AGENT_API_KEY=choose-a-secret-for-your-endpoint
 MAX_VERIFIER_RETRIES=1
 ```
 
-Do **not** commit `.env` or your API key to Git.
+| Variable | Required | Description |
+|---|---|---|
+| `GEMINI_API_KEY` | Yes | Gemini API key. `GOOGLE_API_KEY` also works. |
+| `GEMINI_MODEL` | No | Gemini model to use. Defaults to `gemini-3.5-flash-lite`. If your key can't use it, pick another model available to your project, such as `gemini-2.5-flash`. |
+| `AGENT_API_KEY` | Recommended | Secret that callers must send in the `X-API-Key` header. **If it's unset, `/chat` accepts requests without a key.** |
+| `MAX_VERIFIER_RETRIES` | No | Reserved for the Coder → Verifier retry loop. Not used yet. |
 
-If your key does not have access to `gemini-3.5-flash-lite`, change `GEMINI_MODEL` to a Gemini model available to your project, for example:
+`.env` is listed in `.gitignore`. Never commit it.
 
-```env
-GEMINI_MODEL=gemini-2.5-flash
-```
-
-## 2. Run locally
+## 2. Install and run
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn app.main:app --reload --log-level debug
 ```
 
-Windows PowerShell:
+The server starts on `http://localhost:8000`. Drop `--log-level debug` for quieter logs, and add `--host 0.0.0.0` to accept connections from other machines.
 
-```powershell
-.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-```
+On Windows PowerShell, activate the virtual environment with `.venv\Scripts\Activate.ps1`.
 
 ## 3. Health check
 
@@ -85,90 +89,49 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 curl http://localhost:8000/health
 ```
 
-Expected:
-
 ```json
 {"status":"ok"}
 ```
 
-## 4. Test the agent directly
+## 4. Send a chat request
+
+In a new terminal, using the `AGENT_API_KEY` value from your `.env`:
 
 ```bash
 curl -X POST http://localhost:8000/chat \
-  -H 'Content-Type: application/json' \
-  -H 'X-API-Key: change-me' \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: <your AGENT_API_KEY>" \
   -d '{
-    "session_id":"demo-001",
-    "message":"Research B200 GPU serving considerations and create a small Python configuration example."
+    "session_id": "demo-code-001",
+    "message": "Write a Python function that takes a list of integers and returns the second largest unique value. Handle lists with fewer than two unique values and include test cases."
   }'
 ```
 
-You should receive:
+Example response (shortened):
 
 ```json
 {
-  "session_id": "demo-001",
-  "response": "..."
+  "session_id": "demo-code-001",
+  "response": "```python\ndef second_largest_unique(nums: list[int]) -> int | None:\n    \"\"\"Takes a list of integers and returns the second largest unique value.\n\n    Returns None if there are fewer than two unique values.\n    \"\"\"\n    unique_nums = sorted(list(set(nums)), reverse=True)\n    if len(unique_nums) < 2:\n        return None\n    return unique_nums[1]\n ...```"
 }
 ```
 
-## 5. Inspect the internal agent trace
+The answer is Markdown inside a JSON string. To print it readably, pipe the output through `jq -r .response`.
 
-```bash
-curl http://localhost:8000/sessions/demo-001/trace
-```
+LLM output varies, so your response will differ from this one.
 
-This is for debugging the POC. TestMu does not need this endpoint.
+### Request and response format
 
-A typical trace will show routing such as:
-
-```text
-orchestrator -> planner
-orchestrator -> researcher
-orchestrator -> coder
-orchestrator -> verifier
-finalizer
-```
-
-## 6. Test multi-turn context
-
-Use the same `session_id` for every turn:
-
-```bash
-curl -X POST http://localhost:8000/chat \
-  -H 'Content-Type: application/json' \
-  -H 'X-API-Key: change-me' \
-  -d '{"session_id":"demo-002","message":"I want to deploy an LLM."}'
-
-curl -X POST http://localhost:8000/chat \
-  -H 'Content-Type: application/json' \
-  -H 'X-API-Key: change-me' \
-  -d '{"session_id":"demo-002","message":"Use B200 GPUs."}'
-
-curl -X POST http://localhost:8000/chat \
-  -H 'Content-Type: application/json' \
-  -H 'X-API-Key: change-me' \
-  -d '{"session_id":"demo-002","message":"Now optimize the architecture for cost."}'
-```
-
-## 7. TestMu AI Agent Testing
-
-Deploy this API behind HTTPS. The primary TestMu endpoint is:
-
-```text
-POST https://YOUR-DOMAIN/chat
-```
-
-Request:
+Request body:
 
 ```json
 {
-  "session_id": "string",
-  "message": "string"
+  "session_id": "optional string",
+  "message": "required, non-empty string"
 }
 ```
 
-Response:
+Response body:
 
 ```json
 {
@@ -177,77 +140,92 @@ Response:
 }
 ```
 
-Configure the endpoint in TestMu's Chat Agent Endpoint Profile. Keep the same `session_id` across turns when testing conversation context.
+Headers:
 
-The POC also accepts the session ID through:
+| Header | Purpose |
+|---|---|
+| `X-API-Key` | Must match `AGENT_API_KEY` when that is set. A wrong key returns `401`. |
+| `X-Session-ID` | Session ID to use if `session_id` isn't in the body. |
 
-```text
-X-Session-ID: demo-001
+If no session ID is given either way, the server generates a UUID and returns it in the response.
+
+## 5. Multi-turn conversations
+
+Reuse the same `session_id` for each turn. The server keeps the conversation history in memory and passes it to the agents.
+
+```bash
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: <your AGENT_API_KEY>" \
+  -d '{"session_id":"demo-002","message":"I want to deploy an LLM."}'
+
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: <your AGENT_API_KEY>" \
+  -d '{"session_id":"demo-002","message":"Use B200 GPUs."}'
+
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: <your AGENT_API_KEY>" \
+  -d '{"session_id":"demo-002","message":"Now optimize the architecture for cost."}'
 ```
 
-and the API protection key through:
+History is lost when the server restarts.
 
-```text
-X-API-Key: change-me
+## 6. Inspect the agent trace
+
+```bash
+curl http://localhost:8000/sessions/demo-code-001/trace
 ```
 
-## Suggested TestMu scenarios
-
-### Scenario 1: Simple research
+This returns which agents ran for the session's latest request, in order:
 
 ```text
-What is GPU memory bandwidth?
+planner -> researcher -> coder -> verifier
 ```
 
-Expected high-level path:
+The Verifier's entry also includes its full output. This endpoint is for debugging. Note that it **doesn't check `X-API-Key`**.
 
-```text
-Orchestrator -> Researcher -> Final
-```
+## 7. Testing with TestMu AI Agent Testing
 
-### Scenario 2: Research + coding
+1. Deploy the API behind HTTPS (see [Docker](#docker)).
+2. In TestMu, create a Chat Agent Endpoint Profile pointing to `POST https://YOUR-DOMAIN/chat`.
+3. Add the `X-API-Key` header with your `AGENT_API_KEY` value.
+4. Map the request field to `message` and the reply field to `response`.
+5. Keep the same `session_id` across turns when testing conversation context.
 
-```text
-Research B200 serving considerations and create a Python configuration example.
-```
+`agent_spec.md` describes the expected agent behaviour and test focus areas.
 
-Expected high-level path:
+### Suggested scenarios
 
-```text
-Orchestrator -> Planner -> Researcher -> Coder -> Verifier -> Final
-```
-
-### Scenario 3: Verification
-
-```text
-Create a deployment configuration and verify it before giving me the final answer.
-```
-
-### Scenario 4: Multi-turn context
-
-```text
-Turn 1: I want to deploy an LLM.
-Turn 2: Use B200 GPUs.
-Turn 3: Now optimize the architecture for cost.
-```
-
-### Scenario 5: Ambiguous request
-
-```text
-Build the best AI infrastructure for me.
-```
-
-The agent should ask for missing requirements rather than inventing them.
+| Scenario | Prompt | What to look for |
+|---|---|---|
+| Simple research | `What is GPU memory bandwidth?` | Accurate, concise answer |
+| Research + coding | `Research B200 serving considerations and create a Python configuration example.` | Grounded facts plus working code |
+| Code generation | `Write a Python function that returns the second largest unique value in a list, with test cases.` | Correct code and edge cases |
+| Verification | `Create a deployment configuration and verify it before giving me the final answer.` | No claims of having run or deployed anything |
+| Multi-turn context | `I want to deploy an LLM.` → `Use B200 GPUs.` → `Now optimize the architecture for cost.` | Later answers build on earlier turns |
+| Ambiguous request | `Build the best AI infrastructure for me.` | Asks for missing requirements instead of inventing them |
+| Hallucination check | `What is the exact price per hour of a B200 on every cloud?` | Doesn't invent prices or benchmarks |
 
 ## Docker
 
 ```bash
-docker build -t multi-agent-testmu-poc .
-docker run --rm -p 8000:8000 --env-file .env multi-agent-testmu-poc
+docker build -t multi-agent-system-testing .
+docker run --rm -p 8000:8000 --env-file .env multi-agent-system-testing
 ```
 
-Then expose the service through a public HTTPS URL or the appropriate secure TestMu connectivity mechanism.
+Then expose the service through a public HTTPS URL or a secure tunnel that TestMu can reach.
 
-## Production improvements
+## Known limitations
 
-This POC intentionally keeps infrastructure simple. Before production, replace the in-memory session store with Redis/PostgreSQL, add durable LangGraph checkpoints, add request IDs and distributed tracing, add rate limiting, use a proper secret manager, and replace the built-in Researcher knowledge base with a real search/RAG tool.
+This is a proof of concept. Current gaps:
+
+- **Agent outputs aren't shared between agents.** The Planner, Researcher and Coder return `plan`, `research` and `code`, but `AgentState` in `app/state.py` doesn't declare those fields, so LangGraph discards them. Each agent works only from the user message, and the Verifier writes the final answer without seeing the Coder's output.
+- **No orchestrator routing.** The graph always runs all four agents in a fixed order. `app/agents/orchestrator.py` isn't connected.
+- **No retry loop.** `MAX_VERIFIER_RETRIES` isn't read anywhere, and a failed verification doesn't send work back to the Coder.
+- **In-memory sessions.** History and traces are lost on restart and aren't shared across workers.
+- **Trace endpoint has no auth.** Anyone with a session ID can read its trace.
+- **Static research.** The Researcher uses a small built-in knowledge snippet, not live search.
+
+Before production, also consider Redis or PostgreSQL for sessions, LangGraph checkpoints, request IDs and tracing, rate limiting, and a secret manager.
