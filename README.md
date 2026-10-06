@@ -4,6 +4,25 @@ A small multi-agent assistant built with **FastAPI**, **LangGraph** and **Google
 
 ## Architecture
 
+```mermaid
+flowchart TD
+  C([Client / TestMu AI Agent Testing]) -->|POST /chat| API[FastAPI API<br/>app/main.py]
+  API --> O{{Orchestrator}}
+  O -->|needs planning, no plan yet| PL[Planner]
+  O -->|needs research, none yet| RS[Researcher]
+  O -->|needs code, none yet| CD[Coder]
+  O -->|code not verified yet| VF[Verifier]
+  O -->|no code needed| FN[Finalizer]
+  O -->|verifier passed| END([Response])
+  PL -->|plan| O
+  RS -->|research| O
+  CD -->|code| O
+  VF -->|final answer| O
+  FN -->|final answer| END
+```
+
+Plain-text version, for viewers that don't render Mermaid:
+
 ```text
 Client / TestMu AI Agent Testing
           |
@@ -31,6 +50,17 @@ Planner         Researcher       Coder       Verifier  |
 ```
 
 The Orchestrator (`app/agents/orchestrator.py`) asks Gemini once per request which specialists are needed: planning for complex requests, research for factual ones, and coding for code or configuration. It then sends work to each needed specialist in order. Every specialist reports back to the Orchestrator, which picks the next step.
+
+On each hop the Orchestrator takes the first rule that matches:
+
+| Order | Condition | Next step |
+|---|---|---|
+| 1 | Planning needed and no plan yet | Planner |
+| 2 | Research needed and no research yet | Researcher |
+| 3 | Coding needed and no code yet | Coder |
+| 4 | Coding needed and code not verified yet | Verifier |
+| 5 | Verifier has passed the work | End, returning the Verifier's answer |
+| 6 | Anything else | Finalizer, then end |
 
 - **Code requests** end with the Verifier, which reviews the plan, research and code and writes the final answer.
 - **Other requests** end with the Finalizer (`app/agents/finalizer.py`), which answers from the plan and research. It also asks for clarification when a request is too ambiguous.
@@ -237,6 +267,7 @@ This is a proof of concept. Current gaps:
 
 - **Verifier always passes.** The Verifier fixes problems itself and returns its corrected answer, so it never sends work back to the Coder.
 - **No retry loop.** `MAX_VERIFIER_RETRIES` isn't read anywhere yet.
+- **Partial history.** Only the Orchestrator, Finalizer and Verifier see the conversation history. The Planner, Researcher and Coder see only the current message.
 - **In-memory sessions.** History and traces are lost on restart and aren't shared across workers.
 - **Static research.** The Researcher uses a small built-in knowledge snippet, not live search.
 
