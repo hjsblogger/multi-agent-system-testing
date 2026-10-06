@@ -175,7 +175,8 @@ History is lost when the server restarts.
 ## 6. Inspect the agent trace
 
 ```bash
-curl http://localhost:8000/sessions/demo-code-001/trace
+curl http://localhost:8000/sessions/demo-code-001/trace \
+  -H "X-API-Key: <your AGENT_API_KEY>"
 ```
 
 This returns which agents ran for the session's latest request, in order:
@@ -184,7 +185,7 @@ This returns which agents ran for the session's latest request, in order:
 planner -> researcher -> coder -> verifier
 ```
 
-The Verifier's entry also includes its full output. This endpoint is for debugging. Note that it **doesn't check `X-API-Key`**.
+The Verifier's entry also includes its full output. This endpoint is for debugging and requires the same `X-API-Key` header as `/chat`.
 
 ## 7. Testing with TestMu AI Agent Testing
 
@@ -224,7 +225,6 @@ This is a proof of concept. Current gaps:
 - **No orchestrator routing.** The graph always runs all four agents in a fixed order. `app/agents/orchestrator.py` isn't connected.
 - **No retry loop.** `MAX_VERIFIER_RETRIES` isn't read anywhere, and a failed verification doesn't send work back to the Coder.
 - **In-memory sessions.** History and traces are lost on restart and aren't shared across workers.
-- **Trace endpoint has no auth.** Anyone with a session ID can read its trace.
 - **Static research.** The Researcher uses a small built-in knowledge snippet, not live search.
 
 Before production, also consider Redis or PostgreSQL for sessions, LangGraph checkpoints, request IDs and tracing, rate limiting, and a secret manager.

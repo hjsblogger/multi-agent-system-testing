@@ -99,7 +99,12 @@ def chat(
 
 
 @app.get("/sessions/{session_id}/trace")
-def trace(session_id: str):
+def trace(
+    session_id: str,
+    x_api_key: str | None = Header(None),
+):
+    auth(x_api_key)
+
     return {
         "session_id": session_id,
         "trace": get_trace(session_id),
